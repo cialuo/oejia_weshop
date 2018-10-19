@@ -29,7 +29,9 @@ class WxappOrder(http.Controller, BaseController):
             city_id = int(kwargs.pop('cityId'))
             district_id = int(kwargs.pop('districtId')) if 'districtId' in kwargs.keys() else False
             zipcode = kwargs.pop('code')
+            link_man = kwargs.pop('linkMan')
             calculate = kwargs.pop('calculate', False)
+            remark = kwargs.pop('remark', '')
 
             goods_price, logistics_price, total, goods_list = self.parse_goods_json(
                 goods_json, province_id, city_id, district_id, calculate
@@ -39,13 +41,13 @@ class WxappOrder(http.Controller, BaseController):
                 'zipcode': zipcode,
                 'partner_id': wechat_user.partner_id.id,
                 'number_goods': sum(map(lambda r: r['product_uom_qty'], goods_list)),
-                'goods_price': goods_price,
                 'logistics_price': logistics_price,
-                'total': total,
                 'province_id': province_id,
                 'city_id': city_id,
                 'district_id': district_id,
-                'team_id': entry.team_id.id
+                'team_id': entry.team_id.id,
+                'note': remark,
+                'linkman': link_man,
             }
             order_dict.update(kwargs)
 
@@ -62,7 +64,7 @@ class WxappOrder(http.Controller, BaseController):
                     each_goods['order_id'] = order.id
                     request.env(user=1)['sale.order.line'].create(each_goods)
 
-                #mail_template = request.env.ref('wechat_mall.wechat_mall_order_create')
+                #mail_template = request.env.ref('wechat_mall_order_create')
                 #mail_template.sudo().send_mail(order.id, force_send=True, raise_exception=False)
                 _data = {
                     "amountReal": order.total,
@@ -139,7 +141,7 @@ class WxappOrder(http.Controller, BaseController):
             if not product:
                 raise exceptions.ValidationError('商品不存在！')
 
-            price = product.present_price or goods.list_price
+            price = product.get_present_price()
             total = price * amount
             property_str = product.name
 
@@ -254,16 +256,11 @@ class WxappOrder(http.Controller, BaseController):
             if not order:
                 return self.res_err(404)
 
-            if order.shipper_traces:
-                traces = json.loads(order.shipper_traces).get('data', {})
-            else:
-                traces = {}
-
             data = {
                 "code": 0,
                 "data": {
                     "orderInfo": {
-                        "amount": order.goods_price,
+                        "amount": order.amount_total,
                         "amountLogistics": order.logistics_price,
                         "amountReal": order.total,
                         "dateAdd": order.create_date,
@@ -280,9 +277,9 @@ class WxappOrder(http.Controller, BaseController):
                     },
                     "goods": [
                         {
-                            "amount": each_goods.product_id.price,
+                            "amount": each_goods.price_unit,
                             "goodsId": each_goods.product_id.product_tmpl_id.id,
-                            "goodsName": each_goods.product_id.name,
+                            "goodsName": each_goods.name,
                             "id": each_goods.id,
                             "number": each_goods.product_uom_qty,
                             "orderId": order.id,
@@ -301,15 +298,14 @@ class WxappOrder(http.Controller, BaseController):
                         "provinceId": order.province_id.id,
                         "shipperCode": order.shipper_id.code if order.shipper_id else '',
                         "shipperName": order.shipper_id.name if order.shipper_id else '',
-                        "status": int(traces.get('State', 0)) if order.shipper_id else '',
+                        "status": 0 if order.shipper_id else '',
                         "trackingNumber": order.shipper_no if order.shipper_no else ''
                     },
                 },
                 "msg": "success"
             }
-            traces_list = traces.get('Traces')
-            if traces_list:
-                data["data"]["logisticsTraces"] = traces_list
+            if order.shipper_no:
+                self.build_traces(order, data)
 
             return self.res_ok(data["data"])
 
@@ -317,9 +313,12 @@ class WxappOrder(http.Controller, BaseController):
             _logger.exception(e)
             return self.res_err(-1, e.message)
 
+    def build_traces(self, order, data):
+        pass
 
     @http.route('/<string:sub_domain>/order/close', auth='public', method=['GET'])
-    def close(self, sub_domain, token=None, order_id=None, **kwargs):
+    def close(self, sub_domain, token=None, orderId=None, **kwargs):
+        order_id = orderId
         try:
             res, wechat_user, entry = self._check_user(sub_domain, token)
             if res:return res
@@ -337,7 +336,7 @@ class WxappOrder(http.Controller, BaseController):
 
             order.write({'customer_status': 'closed', 'state': 'cancel'})
 
-            #mail_template = request.env.ref('wechat_mall.wechat_mall_order_closed')
+            #mail_template = request.env.ref('wechat_mall_order_closed')
             #mail_template.sudo().send_mail(order.id, force_send=True, raise_exception=False)
 
             return self.res_ok()
@@ -349,6 +348,9 @@ class WxappOrder(http.Controller, BaseController):
 
     @http.route('/<string:sub_domain>/order/delivery', auth='public', method=['GET'])
     def delivery(self, sub_domain, token=None, orderId=None, **kwargs):
+        '''
+        确认收货接口
+        '''
         order_id = orderId
         try:
             res, wechat_user, entry = self._check_user(sub_domain, token)
@@ -367,7 +369,7 @@ class WxappOrder(http.Controller, BaseController):
 
             order.write({'customer_status': 'unevaluated'})
 
-            #mail_template = request.env.ref('wechat_mall.wechat_mall_order_confirmed')
+            #mail_template = request.env.ref('wechat_mall_order_confirmed')
             #mail_template.sudo().send_mail(order.id, force_send=True, raise_exception=False)
 
             return self.res_ok()
@@ -380,6 +382,7 @@ class WxappOrder(http.Controller, BaseController):
     @http.route('/<string:sub_domain>/order/reputation', auth='public', method=['GET'])
     def reputation(self, sub_domain, token=None, order_id=None, reputation=2, **kwargs):
         '''
+        评论接口
         {
             "token": "xxx",
             "orderId": "4",
@@ -394,6 +397,7 @@ class WxappOrder(http.Controller, BaseController):
             post_json = json.loads(kwargs.pop('postJsonString'))
             token = post_json.get('token',None)
             order_id = post_json.get('orderId',None)
+            reputations = post_json.get('reputations',[])
 
             res, wechat_user, entry = self._check_user(sub_domain, token)
             if res:return res
@@ -410,6 +414,10 @@ class WxappOrder(http.Controller, BaseController):
                 return self.res_err(404)
 
             order.write({'customer_status': 'completed'})
+
+            for reputation in reputations:
+                # 保存评论
+                pass
 
             return request.make_response(json.dumps({'code': 0, 'msg': 'success'}))
 
